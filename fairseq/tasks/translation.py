@@ -11,6 +11,7 @@ import os
 from typing import Optional
 from argparse import Namespace
 from omegaconf import II
+import torch
 
 import numpy as np
 from fairseq import metrics, utils
@@ -57,6 +58,8 @@ def load_langpair_dataset(
     num_buckets=0,
     shuffle=True,
     pad_to_multiple=1,
+    use_weights=False,
+    use_artificial_tgt=False,
 ):
     def split_exists(split, src, tgt, lang, data_path):
         filename = os.path.join(data_path, "{}.{}-{}.{}".format(split, src, tgt, lang))
@@ -64,6 +67,8 @@ def load_langpair_dataset(
 
     src_datasets = []
     tgt_datasets = []
+    weights = []
+    artificial_tgt_datasets = []
 
     for k in itertools.count():
         split_k = split + (str(k) if k > 0 else "")
@@ -106,14 +111,41 @@ def load_langpair_dataset(
             )
         )
 
+        logger.info("use_artificial_tgt: {}".format(use_artificial_tgt))
+        if use_artificial_tgt:
+            artificial_tgt_dataset = data_utils.load_indexed_dataset(
+                prefix + tgt + ".mention", tgt_dict, dataset_impl
+            )
+            if artificial_tgt_dataset is not None:
+                artificial_tgt_datasets.append(artificial_tgt_dataset)
+
+        logger.info("use_weights: {}".format(use_weights))
+        if use_weights:
+            tgt_weight = []
+            logging.info("using weights")
+            with open(os.path.join(data_path, "{}.{}".format("weights", split_k)), 'rb') as ifile:
+                for i in ifile.readlines():
+                    tgt_weight.append(torch.tensor(float(i)))
+
+            if len(tgt_weight) > 0:
+                weights.append(tgt_weight)
+
         if not combine:
             break
 
     assert len(src_datasets) == len(tgt_datasets) or len(tgt_datasets) == 0
 
+    if len(weights) > 0: 
+        assert len(weights) == len(src_datasets)
+    
+    if len(artificial_tgt_datasets) > 0: 
+        assert len(artificial_tgt_datasets) == len(src_datasets)
+
     if len(src_datasets) == 1:
         src_dataset = src_datasets[0]
         tgt_dataset = tgt_datasets[0] if len(tgt_datasets) > 0 else None
+        artificial_tgt_dataset = artificial_tgt_datasets[0] if len(artificial_tgt_datasets) > 0 else None
+        weights = weights[0] if len(weights) > 0 else None
     else:
         sample_ratios = [1] * len(src_datasets)
         sample_ratios[0] = upsample_primary
@@ -122,12 +154,23 @@ def load_langpair_dataset(
             tgt_dataset = ConcatDataset(tgt_datasets, sample_ratios)
         else:
             tgt_dataset = None
+        if len(artificial_tgt_datasets) > 0:
+            artificial_tgt_dataset = ConcatDataset(artificial_tgt_datasets, sample_ratios)
+        else:
+            artificial_tgt_dataset = None
+        if len(weights) > 0:
+            weights = ConcatDataset(weights, sample_ratios)
+            assert weights != None
+        else:
+            weights = None
 
     if prepend_bos:
         assert hasattr(src_dict, "bos_index") and hasattr(tgt_dict, "bos_index")
         src_dataset = PrependTokenDataset(src_dataset, src_dict.bos())
         if tgt_dataset is not None:
             tgt_dataset = PrependTokenDataset(tgt_dataset, tgt_dict.bos())
+        if artificial_tgt_dataset is not None:
+            artificial_tgt_dataset = PrependTokenDataset(artificial_tgt_dataset, tgt_dict.bos())
 
     eos = None
     if append_source_id:
@@ -139,6 +182,10 @@ def load_langpair_dataset(
                 tgt_dataset, tgt_dict.index("[{}]".format(tgt))
             )
         eos = tgt_dict.index("[{}]".format(tgt))
+        if artificial_tgt_dataset is not None:
+            artificial_tgt_dataset = AppendTokenDataset(
+                artificial_tgt_dataset, tgt_dataset.index("[{}]".format(tgt))
+            )
 
     align_dataset = None
     if load_alignments:
@@ -149,6 +196,7 @@ def load_langpair_dataset(
             )
 
     tgt_dataset_sizes = tgt_dataset.sizes if tgt_dataset is not None else None
+    artificial_tgt_dataset_sizes = artificial_tgt_dataset.sizes if artificial_tgt_dataset is not None else None
     return LanguagePairDataset(
         src_dataset,
         src_dataset.sizes,
@@ -163,6 +211,9 @@ def load_langpair_dataset(
         num_buckets=num_buckets,
         shuffle=shuffle,
         pad_to_multiple=pad_to_multiple,
+        weights=weights,
+        artificial_tgt=artificial_tgt_dataset, 
+        artificial_tgt_sizes=artificial_tgt_dataset_sizes,
     )
 
 
@@ -258,6 +309,16 @@ class TranslationConfig(FairseqDataclass):
     eval_bleu_print_samples: bool = field(
         default=False, metadata={"help": "print sample generations during validation"}
     )
+    use_weights: bool = field(
+        default=False,
+    )
+    use_artificial_tgt: bool = field(
+        default=False
+    )
+
+    multitask: bool = field(
+        default = False
+    )
 
 
 @register_task("translation", dataclass=TranslationConfig)
@@ -321,6 +382,8 @@ class TranslationTask(FairseqTask):
         Args:
             split (str): name of the split (e.g., train, valid, test)
         """
+        # logger.info(use_weights)
+        # assert use_weights == True
         paths = utils.split_paths(self.cfg.data)
         assert len(paths) > 0
         if split != self.cfg.train_subset:
@@ -350,6 +413,8 @@ class TranslationTask(FairseqTask):
             num_buckets=self.cfg.num_batch_buckets,
             shuffle=(split != "test"),
             pad_to_multiple=self.cfg.required_seq_len_multiple,
+            use_weights=self.cfg.use_weights,
+            use_artificial_tgt=self.cfg.use_artificial_tgt,
         )
 
     def build_dataset_for_inference(self, src_tokens, src_lengths, constraints=None):
@@ -435,6 +500,11 @@ class TranslationTask(FairseqTask):
     def max_positions(self):
         """Return the max sentence length allowed by the task."""
         return (self.cfg.max_source_positions, self.cfg.max_target_positions)
+
+    def build_multitask_criterion():
+         from fairseq import criterions
+
+        return criterions.build_criterion(cfg, self)
 
     @property
     def source_dictionary(self):

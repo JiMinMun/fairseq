@@ -23,6 +23,7 @@ def collate(
     pad_to_length=None,
     pad_to_multiple=1,
 ):
+    # logger.info("Calling collate function")
     if len(samples) == 0:
         return {}
 
@@ -110,19 +111,62 @@ def collate(
     else:
         ntokens = src_lengths.sum().item()
 
+    artificial_target = None
+    art_prev_output_tokens = None
+    if samples[0].get("artificial_target", None) is not None:
+        logger.info("artificial target is not None")
+        artificial_target = merge(
+            "artificial_target",
+            left_pad=left_pad_target,
+            pad_to_length=pad_to_length["artificial_target"]
+            if pad_to_length is not None
+            else None,
+        )
+        artificial_target = artificial_target.index_select(0, sort_order)
+        artificial_target_lengths = torch.LongTensor(
+            [s["artificial_target"].ne(pad_idx).long().sum() for s in samples]
+        ).index_select(0, sort_order)
+        # ntokens = artificial_target_lengths.sum().item()
+
+        if samples[0].get("prev_output_tokens", None) is not None:
+            art_prev_output_tokens = merge("prev_output_tokens", left_pad=left_pad_target)
+        elif input_feeding:
+            # we create a shifted version of targets for feeding the
+            # previous output token(s) into the next decoder step
+            art_prev_output_tokens = merge(
+                "artificial_target",
+                left_pad=left_pad_target,
+                move_eos_to_beginning=True,
+                pad_to_length=pad_to_length["artificial_target"]
+                if pad_to_length is not None
+                else None,
+            )
+
+    # logger.info("target shape: {}".format(target.shape))
+    # if artificial_target is not None:
+    #     logger.info("artificial target shape: {}".format(artificial_target.shape))
     batch = {
         "id": id,
         "nsentences": len(samples),
         "ntokens": ntokens,
         "net_input": {"src_tokens": src_tokens, "src_lengths": src_lengths,},
         "target": target,
+        "weights": samples[0].get("weights", None),
+        "artificial_target": artificial_target,
+        "artificial_net_input": {"src_tokens": src_tokens, "src_lengths": src_lengths,},
     }
+
     if prev_output_tokens is not None:
         batch["net_input"]["prev_output_tokens"] = prev_output_tokens.index_select(
             0, sort_order
         )
+        if art_prev_output_tokens is not None:
+            batch["artificial_net_input"]["prev_output_tokens"] = art_prev_output_tokens.index_select(
+                0, sort_order
+            )
 
     if samples[0].get("alignment", None) is not None:
+        logging.info("alignment: {}".format(samples[0].get("alignment")))
         bsz, tgt_sz = batch["target"].shape
         src_sz = batch["net_input"]["src_tokens"].shape[1]
 
@@ -159,6 +203,10 @@ def collate(
             constraints[i, 0 : lens[i]] = samples[i].get("constraints")
         batch["constraints"] = constraints.index_select(0, sort_order)
 
+    # logger.info("after collate function")
+    # logger.info("target shape: {}".format(target.shape))
+    # if artificial_target is not None:
+    #     logger.info("artificial target shape: {}".format(artificial_target.shape))
     return batch
 
 
@@ -223,6 +271,9 @@ class LanguagePairDataset(FairseqDataset):
         src_lang_id=None,
         tgt_lang_id=None,
         pad_to_multiple=1,
+        weights=None,
+        artificial_tgt=None, 
+        artificial_tgt_sizes=None,
     ):
         if tgt_dict is not None:
             assert src_dict.pad() == tgt_dict.pad()
@@ -232,10 +283,17 @@ class LanguagePairDataset(FairseqDataset):
             assert len(src) == len(
                 tgt
             ), "Source and target must contain the same number of examples"
+        if artificial_tgt is not None:
+            assert len(src) == len(
+                artificial_tgt
+            ), "Source and artificial target must contain the same number of examples"
         self.src = src
         self.tgt = tgt
+        self.weights = weights
+        self.artificial_tgt = artificial_tgt
         self.src_sizes = np.array(src_sizes)
         self.tgt_sizes = np.array(tgt_sizes) if tgt_sizes is not None else None
+        self.artificial_tgt_sizes = np.array(artificial_tgt_sizes) if artificial_tgt is not None else None
         self.sizes = (
             np.vstack((self.src_sizes, self.tgt_sizes)).T
             if self.tgt_sizes is not None
@@ -283,6 +341,19 @@ class LanguagePairDataset(FairseqDataset):
                 logger.info(
                     "bucketing target lengths: {}".format(list(self.tgt.buckets))
                 )
+            
+            if self.artificial_tgt is not None:
+                self.artificial_tgt = BucketPadLengthDataset(
+                    self.artificial_tgt,
+                    sizes=self.artificial_tgt_sizes,
+                    num_buckets=num_buckets,
+                    pad_idx=self.tgt_dict.pad(),
+                    left_pad=self.left_pad_target,
+                )
+                self.artificial_tgt_sizes = self.artificial_tgt.sizes
+                logger.info(
+                    "bucketing artificial target lengths: {}".format(list(self.artificial_tgt.buckets))
+                )
 
             # determine bucket sizes using self.num_tokens, which will return
             # the padded lengths (thanks to BucketPadLengthDataset)
@@ -294,6 +365,10 @@ class LanguagePairDataset(FairseqDataset):
         else:
             self.buckets = None
         self.pad_to_multiple = pad_to_multiple
+        # logger.info("after init")
+        # logger.info("target dataset size: {}".format(self.tgt.sizes()))
+        # if self.artificial_tgt is not None:
+        #     logger.info("artificial target dataset size: {}".format(self.artificial_tgt.sizes()))
 
     def get_batch_shapes(self):
         return self.buckets
@@ -301,6 +376,8 @@ class LanguagePairDataset(FairseqDataset):
     def __getitem__(self, index):
         tgt_item = self.tgt[index] if self.tgt is not None else None
         src_item = self.src[index]
+        weight_item = self.weights[index] if self.weights is not None else None
+        artificial_tgt_item = self.artificial_tgt[index] if self.artificial_tgt is not None else None
         # Append EOS to end of tgt sentence if it does not have an EOS and remove
         # EOS from end of src sentence if it exists. This is useful when we use
         # use existing datasets for opposite directions i.e., when we want to
@@ -309,11 +386,15 @@ class LanguagePairDataset(FairseqDataset):
             eos = self.tgt_dict.eos() if self.tgt_dict else self.src_dict.eos()
             if self.tgt and self.tgt[index][-1] != eos:
                 tgt_item = torch.cat([self.tgt[index], torch.LongTensor([eos])])
+            if self.artificial_tgt and self.artificial_tgt[index][-1] != eos:
+                artificial_tgt_item = torch.cat([self.artificial_tgt[index], torch.LongTensor([eos])])
 
         if self.append_bos:
             bos = self.tgt_dict.bos() if self.tgt_dict else self.src_dict.bos()
             if self.tgt and self.tgt[index][0] != bos:
                 tgt_item = torch.cat([torch.LongTensor([bos]), self.tgt[index]])
+            if self.artificial_tgt and self.artificial_tgt[index][0] != bos:
+                artificial_tgt_item = torch.cat([torch.LongTensor([bos]), self.artificial_tgt[index]])
 
             bos = self.src_dict.bos()
             if self.src[index][0] != bos:
@@ -328,11 +409,15 @@ class LanguagePairDataset(FairseqDataset):
             "id": index,
             "source": src_item,
             "target": tgt_item,
+            "weights": weight_item,
+            "artificial_target": artificial_tgt_item,
         }
         if self.align_dataset is not None:
             example["alignment"] = self.align_dataset[index]
         if self.constraints is not None:
             example["constraints"] = self.constraints[index]
+        # if self.weights is not None:
+        #     example["weights"] = self.weights[index]
         return example
 
     def __len__(self):
@@ -384,7 +469,12 @@ class LanguagePairDataset(FairseqDataset):
             pad_to_length=pad_to_length,
             pad_to_multiple=self.pad_to_multiple,
         )
+        # logger.info("right after calling collate")
+        # logger.info("res target size: {}".format(res["target"].shape))
+        # if res["artificial_target"] is not None:
+        #     logger.info("res artificial target size: {}".format(res["artificial_target"].shape))
         if self.src_lang_id is not None or self.tgt_lang_id is not None:
+            # logger.info("self.tgt_lang_id {}".format(self.tgt_lang_id))
             src_tokens = res["net_input"]["src_tokens"]
             bsz = src_tokens.size(0)
             if self.src_lang_id is not None:
@@ -395,6 +485,9 @@ class LanguagePairDataset(FairseqDataset):
                 res["tgt_lang_id"] = (
                     torch.LongTensor([[self.tgt_lang_id]]).expand(bsz, 1).to(src_tokens)
                 )
+        # logger.info("res target size: {}".format(res["target"].shape))
+        # if res["artificial_target"] is not None:
+        #     logger.info("res artificial target size: {}".format(res["artificial_target"].shape))
         return res
 
     def num_tokens(self, index):

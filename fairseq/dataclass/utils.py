@@ -403,7 +403,10 @@ def convert_namespace_to_omegaconf(args: Namespace) -> DictConfig:
 
         _set_legacy_defaults(cfg.criterion, CRITERION_REGISTRY[args.criterion])
         cfg.criterion._name = args.criterion
-
+    # if cfg.use_weights is None and getattr(args, "use_weights", None):
+    #     cfg.use_weights = args.use_weights
+    # if cfg.use_artificial_tgt is None and getattr(args, "use_artificial_weights", None):
+    #     cfg.use_artificial_tgt = args.use_artificial_tgt
     _utils.is_primitive_type = old_primitive
     OmegaConf.set_struct(cfg, True)
     return cfg

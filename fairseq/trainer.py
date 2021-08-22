@@ -432,6 +432,7 @@ class Trainer(object):
         data_selector=None,
         shard_batch_itr=True,
         disable_iterator_cache=False,
+        use_weights=False,
     ):
         """Return an EpochBatchIterator over the training set for a given epoch."""
         if load_dataset:
@@ -441,6 +442,7 @@ class Trainer(object):
                 epoch=epoch,
                 combine=combine,
                 data_selector=data_selector,
+                use_weights=use_weights,
             )
         batch_iterator = self.task.get_batch_iterator(
             dataset=self.task.dataset(self.cfg.dataset.train_subset),
@@ -534,7 +536,6 @@ class Trainer(object):
         logging_outputs, sample_size, ooms = [], 0, 0
         for i, sample in enumerate(samples):  # delayed update loop
             sample, is_dummy_batch = self._prepare_sample(sample)
-
             def maybe_no_sync():
                 """
                 Whenever *samples* contains more than one mini-batch, we
@@ -785,6 +786,8 @@ class Trainer(object):
     @metrics.aggregate("valid")
     def valid_step(self, sample, raise_oom=False):
         """Do forward pass in evaluation mode."""
+        # logger.info("validation")
+        # logger.info(sample)
         if self.tpu:
             import torch_xla.core.xla_model as xm
 

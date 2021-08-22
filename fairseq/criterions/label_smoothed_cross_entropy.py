@@ -30,13 +30,33 @@ class LabelSmoothedCrossEntropyCriterionConfig(FairseqDataclass):
     sentence_avg: bool = II("optimization.sentence_avg")
 
 
-def label_smoothed_nll_loss(lprobs, target, epsilon, ignore_index=None, reduce=True):
+def label_smoothed_nll_loss(lprobs, target, epsilon, ignore_index=None, reduce=True, weights=None):
     if target.dim() == lprobs.dim() - 1:
         target = target.unsqueeze(-1)
+    # print("target shape: {}".format(target.shape))
+    # print("lprobs shape: {}".format(lprobs.shape))
+    # print("ignore index: {}".format(ignore_index))
+    # if target.shape[0] != lprobs.shape[0]:
+    #     target = target[:lprobs.shape[0]]
+    # print("target.shape: {}".format(target.shape))
     nll_loss = -lprobs.gather(dim=-1, index=target)
+    # print("nll_loss shape: {}".format(nll_loss.shape))
+    # if weights is not None:
+    #     print("weights: {}".format(weights))
+    #     nll_loss.mul(weights)
     smooth_loss = -lprobs.sum(dim=-1, keepdim=True)
+    # print("smooth loss shape: {}".format(smooth_loss.shape))
     if ignore_index is not None:
+        # zero_mask = torch.zeros(nll_loss.shape, dtype=torch.bool)
         pad_mask = target.eq(ignore_index)
+        # print("pad mask shape: {}".format(pad_mask.shape))
+        # zero_mask[:min(nll_loss.shape[0], target.shape[0]), :] = pad_mask
+        # pad_mask = zero_mask.to(pad_mask.device)
+        # print("zero mask shape: {}".format(zero_mask.shape))
+        # if lprobs.shape[0] > target.shape[0]:
+        #     pad_mask = torch.nn.ConstantPad2d((0, 0, 0, lprobs.shape[0] - target.shape[0]), 0)(pad_mask).bool()
+        #     nll_loss = torch.nn.ConstantPad2d((0, 0, 0, lprobs.shape[0] - target.shape[0]), 0.0)(nll_loss)
+        # print("pad mask shape: {}".format(pad_mask.shape))
         nll_loss.masked_fill_(pad_mask, 0.0)
         smooth_loss.masked_fill_(pad_mask, 0.0)
     else:
@@ -47,6 +67,8 @@ def label_smoothed_nll_loss(lprobs, target, epsilon, ignore_index=None, reduce=T
         smooth_loss = smooth_loss.sum()
     eps_i = epsilon / (lprobs.size(-1) - 1)
     loss = (1.0 - epsilon - eps_i) * nll_loss + eps_i * smooth_loss
+    if weights != None:
+        return loss * weights, nll_loss * weights
     return loss, nll_loss
 
 
@@ -61,6 +83,7 @@ class LabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         label_smoothing,
         ignore_prefix_size=0,
         report_accuracy=False,
+        use_weights=False,
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -76,8 +99,18 @@ class LabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         2) the sample size, which is used as the denominator for the gradient
         3) logging outputs to display while training
         """
+        # print(sample["net_input"])
+        # print(type(sample["net_input"]))
         net_output = model(**sample["net_input"])
         loss, nll_loss = self.compute_loss(model, net_output, sample, reduce=reduce)
+        if sample.get("artificial_target", None) is not None:
+            art_sample = sample.copy()
+            art_sample["net_input"] = sample["artificial_net_input"]
+            art_sample["target"] = sample["artificial_target"]
+            net_output = model(**art_sample["net_input"])
+            art_loss, art_nll_loss = self.compute_loss(model, net_output, art_sample, reduce=reduce)
+            loss = 0.9 * loss + 0.1 * art_loss
+            nll_loss = 0.9 * nll_loss + 0.1 * art_nll_loss
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else sample["ntokens"]
         )
@@ -97,24 +130,46 @@ class LabelSmoothedCrossEntropyCriterion(FairseqCriterion):
     def get_lprobs_and_target(self, model, net_output, sample):
         lprobs = model.get_normalized_probs(net_output, log_probs=True)
         target = model.get_targets(sample, net_output)
+        # artificial_target = sample["artificial_target"]
+        # print("target shape: {}".format(target.shape))
+        # print("artificial target shape: {}".format(artificial_target.shape))
         if self.ignore_prefix_size > 0:
             if getattr(lprobs, "batch_first", False):
                 lprobs = lprobs[:, self.ignore_prefix_size :, :].contiguous()
                 target = target[:, self.ignore_prefix_size :].contiguous()
+                # if artificial_target is not None:
+                #     artificial_target = artificial_target[:, self.ignore_prefix_size :].contiguous()
             else:
                 lprobs = lprobs[self.ignore_prefix_size :, :, :].contiguous()
                 target = target[self.ignore_prefix_size :, :].contiguous()
+                # if artificial_target is not None:
+                #     artificial_target = artificial_target[self.ignore_prefix_size :, :].contiguous()
         return lprobs.view(-1, lprobs.size(-1)), target.view(-1)
+        # , artificial_target.view(-1) if artificial_target is not None else None
 
     def compute_loss(self, model, net_output, sample, reduce=True):
         lprobs, target = self.get_lprobs_and_target(model, net_output, sample)
+        # print("calling label_smoothed_nll_loss")
         loss, nll_loss = label_smoothed_nll_loss(
             lprobs,
             target,
             self.eps,
             ignore_index=self.padding_idx,
             reduce=reduce,
+            weights=sample['weights']
         )
+
+        # if artificial_target is not None:
+        #     art_loss, art_nll_loss = label_smoothed_nll_loss(
+        #         lprobs,
+        #         artificial_target,
+        #         self.eps,
+        #         ignore_index=self.padding_idx,
+        #         reduce=reduce,
+        #         weights=sample['weights']
+        #     )
+        #     loss = 0.9 * loss + 0.1 * art_loss
+        #     nll_loss = 0.9 * nll_loss + 0.1 * art_nll_loss
         return loss, nll_loss
 
     def compute_accuracy(self, model, net_output, sample):

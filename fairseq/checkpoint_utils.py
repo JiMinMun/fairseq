@@ -347,6 +347,7 @@ def load_model_ensemble_and_task(
     ensemble = []
     cfg = None
     for filename in filenames:
+        logging.debug("loading file {}".format(filename))
         orig_filename = filename
         assert num_shards > 0
         for shard_idx in range(num_shards):
@@ -359,6 +360,8 @@ def load_model_ensemble_and_task(
                 raise IOError("Model file not found: {}".format(filename))
             if state is None:
                 state = load_checkpoint_to_cpu(filename, arg_overrides)
+                logging.debug(state["args"])
+                logging.debug(state["cfg"])
             if "args" in state and state["args"] is not None:
                 cfg = convert_namespace_to_omegaconf(state["args"])
             elif "cfg" in state and state["cfg"] is not None:

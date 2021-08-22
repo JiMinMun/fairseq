@@ -473,9 +473,12 @@ class FairseqTask(object):
         model.train()
         model.set_num_updates(update_num)
         with torch.autograd.profiler.record_function("forward"):
+            # logger.info("forward with criterion: {}".format(criterion))
             loss, sample_size, logging_output = criterion(model, sample)
+            # add if statement here to check to extract feature + add linear
+            
         if ignore_grad:
-            loss *= 0
+            loss *= 0 
         with torch.autograd.profiler.record_function("backward"):
             optimizer.backward(loss)
         return loss, sample_size, logging_output
@@ -498,6 +501,8 @@ class FairseqTask(object):
         self, generator, models, sample, prefix_tokens=None, constraints=None
     ):
         with torch.no_grad():
+            # logger.debug("sample: {}".format(sample))
+            # logger.debug("generator: {}".format(generator))
             return generator.generate(
                 models, sample, prefix_tokens=prefix_tokens, constraints=constraints
             )

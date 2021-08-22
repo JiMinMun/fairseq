@@ -35,21 +35,31 @@ from fairseq.trainer import Trainer
 from omegaconf import DictConfig, OmegaConf
 
 
+logging.root.handlers = []
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     level=os.environ.get("LOGLEVEL", "INFO").upper(),
-    stream=sys.stdout,
+    handlers=[
+        logging.FileHandler("/data1/jimin/medical-entity/logs/debug.log", mode="w"),
+        logging.StreamHandler()
+    ],
+    # stream=sys.stdout,
 )
 logger = logging.getLogger("fairseq_cli.train")
 
 
 def main(cfg: FairseqConfig) -> None:
     if isinstance(cfg, argparse.Namespace):
+        # logger.info("converting config to omegaconf")
         cfg = convert_namespace_to_omegaconf(cfg)
-
+    # logger.info("moving on with config type {}".format(type(cfg)))
+    # logger.info("isinstance cfg: {}".format(isinstance(cfg, argparse.Namespace)))
     utils.import_user_module(cfg.common)
 
+    # if cfg.use_weights == None:
+    #     cfg.use_weights = False
+        
     if is_master(cfg.distributed_training) and "job_logging_cfg" in cfg:
         # make hydra logging work with ddp (see # see https://github.com/facebookresearch/hydra/issues/1126)
         logging.config.dictConfig(OmegaConf.to_container(cfg.job_logging_cfg))
@@ -135,6 +145,7 @@ def main(cfg: FairseqConfig) -> None:
         trainer,
         # don't cache epoch iterators for sharded datasets
         disable_iterator_cache=task.has_sharded_data("train"),
+        # use_weights=cfg.use_weights,
     )
 
     max_epoch = cfg.optimization.max_epoch or math.inf

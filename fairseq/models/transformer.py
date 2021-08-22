@@ -285,6 +285,7 @@ class TransformerModel(FairseqEncoderDecoderModel):
         Copied from the base class, but without ``**kwargs``,
         which are not supported by TorchScript.
         """
+        print("forward called in transformer")
         encoder_out = self.encoder(
             src_tokens, src_lengths=src_lengths, return_all_hiddens=return_all_hiddens
         )

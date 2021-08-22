@@ -237,6 +237,8 @@ def get_parser(desc, default_task="translation"):
         choices=TASK_REGISTRY.keys(),
         help="task",
     )
+    # parser.add_argument("--use-weights", action="store_true", default=False)
+    # parser.add_argument("--use-artificial-tgt", action="store_true", default=False)
     # fmt: on
     return parser
 

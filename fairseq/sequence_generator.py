@@ -5,6 +5,7 @@
 
 import math
 from typing import Dict, List, Optional
+from typing_extensions import final
 
 import torch
 import torch.nn as nn
@@ -13,7 +14,9 @@ from fairseq.data import data_utils
 from fairseq.models import FairseqIncrementalDecoder
 from torch import Tensor
 from fairseq.ngram_repeat_block import NGramRepeatBlock
+import logging
 
+logger = logging.getLogger(__name__)
 
 class SequenceGenerator(nn.Module):
     def __init__(
@@ -196,6 +199,7 @@ class SequenceGenerator(nn.Module):
             ],
         )
         net_input = sample["net_input"]
+        # logger.debug("generator net input: {}".format(net_input))
 
         if "src_tokens" in net_input:
             src_tokens = net_input["src_tokens"]
@@ -326,6 +330,7 @@ class SequenceGenerator(nn.Module):
             )
 
             if self.lm_model is not None:
+                # logger.debug("lm_model: {}".format(self.lm_model))
                 lm_out = self.lm_model(tokens[:, : step + 1])
                 probs = self.lm_model.get_normalized_probs(
                     lm_out, log_probs=True, sample=None
@@ -365,6 +370,7 @@ class SequenceGenerator(nn.Module):
                 attn[:, :, step + 1].copy_(avg_attn_scores)
 
             scores = scores.type_as(lprobs)
+            # logger.debug("scores: {}".format(scores))
             eos_bbsz_idx = torch.empty(0).to(
                 tokens
             )  # indices of hypothesis ending with eos (finished sentences)
@@ -379,6 +385,7 @@ class SequenceGenerator(nn.Module):
                 lprobs = self.repeat_ngram_blocker(tokens, lprobs, bsz, beam_size, step)
 
             # Shape: (batch, cand_size)
+            # logger.debug("calling search")
             cand_scores, cand_indices, cand_beams = self.search.step(
                 step,
                 lprobs.view(bsz, -1, self.vocab_size),
@@ -386,6 +393,7 @@ class SequenceGenerator(nn.Module):
                 tokens[:, : step + 1],
                 original_batch_idxs,
             )
+            # logger.debug("cand score: {}".format(cand_scores))
 
             # cand_bbsz_idx contains beam indices for the top candidate
             # hypotheses, with a range of values: [0, bsz*beam_size),
@@ -403,12 +411,15 @@ class SequenceGenerator(nn.Module):
             eos_bbsz_idx = torch.masked_select(
                 cand_bbsz_idx[:, :beam_size], mask=eos_mask[:, :beam_size]
             )
-
+            
+            # logger.debug("eos bbsz idx: {}".format(eos_bbsz_idx))
             finalized_sents: List[int] = []
             if eos_bbsz_idx.numel() > 0:
                 eos_scores = torch.masked_select(
                     cand_scores[:, :beam_size], mask=eos_mask[:, :beam_size]
                 )
+
+                # logger.debug("eos_scores: {}".format(eos_scores))
 
                 finalized_sents = self.finalize_hypos(
                     step,
@@ -434,6 +445,7 @@ class SequenceGenerator(nn.Module):
 
             # Remove finalized sentences (ones for which {beam_size}
             # finished hypotheses have been generated) from the batch.
+            # logger.debug("finalized sents: {}".format(finalized_sents))
             if len(finalized_sents) > 0:
                 new_bsz = bsz - len(finalized_sents)
 
@@ -537,7 +549,7 @@ class SequenceGenerator(nn.Module):
 
             # reorder incremental state in decoder
             reorder_state = active_bbsz_idx
-
+        # logger.debug("generator finalized: {}".format(finalized))
         # sort by score descending
         for sent in range(len(finalized)):
             scores = torch.tensor(

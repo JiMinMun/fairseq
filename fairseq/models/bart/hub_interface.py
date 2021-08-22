@@ -112,6 +112,7 @@ class BARTHubInterface(GeneratorHubInterface):
                 **kwargs
             )
             res.extend(results)
+        logger.debug("BARTHubInterface: results: {}".format(res))
         return res
 
     def extract_features(
